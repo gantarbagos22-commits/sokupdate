@@ -11,7 +11,6 @@ kick_progress_subscribers = {}
 balance_waiters = {}
 message_waiters = {}
 participant_waiters = {}
-room_join_waiters = {}
 
 
 def make_id(): return secrets.token_hex(16)
@@ -55,7 +54,7 @@ async def close_session(session_id, reason='logout'):
     for q in list(subscribers.pop(session_id, set())):
         try: q.put_nowait(None)
         except Exception: pass
-    for table in (balance_waiters, participant_waiters, message_waiters, room_join_waiters):
+    for table in (balance_waiters, participant_waiters, message_waiters):
         entry = table.pop(session_id, None)
         if entry:
             items = entry if isinstance(entry, list) else [entry]
@@ -91,24 +90,13 @@ async def ws_reader(session_id, ws, username, socket_index, login_future):
                     publish(session_id, {'type':'countdown.trigger','socketIndex':0,'event':data,'receivedAt':received})
             publish(session_id, {'type':'api.event','socketIndex':socket_index,'event':data,'receivedAt':received})
             if data.get('type') == 'session.ready' and not login_future.done():
-                account = {'sessionId':session_id,'username':username,'socket':ws,'connectedAt':now_ms(),'joinedRoom':None,'socketIndex':socket_index,'permissions':(data.get('data') or {}).get('developer',{}).get('permissions',[]),'countdownTrigger':None,'joinRequestedRoom':None,'joinStatus':'idle','joinError':None}
+                account = {'sessionId':session_id,'username':username,'socket':ws,'connectedAt':now_ms(),'joinedRoom':None,'socketIndex':socket_index,'permissions':(data.get('data') or {}).get('developer',{}).get('permissions',[]),'countdownTrigger':None}
                 sessions[session_id] = account
                 if data.get('type') == 'session.ready':
                     wallet = (data.get('data') or {}).get('wallet') or (data.get('data') or {}).get('developer',{}).get('wallet')
                     login_future.set_result({'sessionId':session_id,'username':username,'permissions':account['permissions'],'wallet':wallet})
-            if is_join_result(data):
-                joined = extract_room(data)
-                if joined and session_id in sessions:
-                    sessions[session_id]['joinedRoom'] = joined
-                    sessions[session_id]['joinStatus'] = 'joined'
-                    sessions[session_id]['joinError'] = None
-                    publish(session_id, {'type':'room.join.status','status':'joined','requestedRoom':sessions[session_id].get('joinRequestedRoom'),'room':joined,'event':data,'receivedAt':received})
-            elif is_error_for_join(data):
-                if session_id in sessions:
-                    code, message = extract_api_error(data)
-                    sessions[session_id]['joinStatus'] = 'error'
-                    sessions[session_id]['joinError'] = message
-                    publish(session_id, {'type':'room.join.status','status':'error','requestedRoom':sessions[session_id].get('joinRequestedRoom'),'code':code,'message':message,'event':data,'receivedAt':received})
+            if data.get('type') == 'room.join.result' and (data.get('data') or {}).get('room'):
+                if session_id in sessions: sessions[session_id]['joinedRoom'] = data['data']['room']
             if data.get('type') == 'session.replaced': publish(session_id, {'type':'login.status','status':'error','code':'session.replaced','message':'Session digantikan oleh login lain.'})
             if data.get('type') == 'error' and not login_future.done():
                 code, message = extract_api_error(data); login_future.set_exception(RuntimeError(f'{code}: {message}'))
@@ -172,35 +160,6 @@ def new_waiter(table, session_id, timeout):
             if not fut.done(): fut.set_exception(asyncio.TimeoutError())
     asyncio.create_task(timeout_task()); return fut
 
-def normalize_room(value):
-    if value is None:
-        return ''
-    return ' '.join(str(value).strip().split())
-
-
-def extract_room(msg):
-    data = msg.get('data') or {}
-    candidates = (
-        data.get('room'), data.get('room_name'), data.get('roomName'),
-        msg.get('room'), msg.get('room_name'), msg.get('roomName')
-    )
-    for value in candidates:
-        room = normalize_room(value)
-        if room:
-            return room
-    return ''
-
-
-def is_join_result(msg):
-    typ = str(msg.get('type', '')).lower()
-    return typ in ('room.join.result', 'room.joined', 'room.join.success')
-
-
-def is_error_for_join(msg):
-    typ = str(msg.get('type', '')).lower()
-    return typ in ('error', 'room.join.error', 'room.join.failed')
-
-
 def resolve_waiters(session_id,msg):
     typ=str(msg.get('type',''))
     if 'participant' in typ:
@@ -213,30 +172,7 @@ def resolve_waiters(session_id,msg):
         futs=message_waiters.pop(session_id,[])
         if not isinstance(futs,list): futs=[futs]
         for fut in futs:
-            if not fut.done():
-                if typ=='error': fut.set_exception(RuntimeError(extract_api_error(msg)[1] or 'room.send_message gagal.'))
-                else: fut.set_result(msg)
-
-    # room.join responses are matched only to the room that was requested.
-    # This prevents a stale/late event for another room from being treated as
-    # the current join result.
-    if is_join_result(msg):
-        entry = room_join_waiters.get(session_id)
-        if entry:
-            actual = normalize_room(extract_room(msg))
-            expected = normalize_room(entry.get('room'))
-            if actual and expected and actual.casefold() != expected.casefold():
-                return
-            room_join_waiters.pop(session_id, None)
-            fut = entry.get('future')
-            if fut and not fut.done(): fut.set_result(msg)
-    elif is_error_for_join(msg):
-        entry = room_join_waiters.pop(session_id, None)
-        if entry:
-            fut = entry.get('future')
-            if fut and not fut.done():
-                code, message = extract_api_error(msg)
-                fut.set_exception(RuntimeError(f'{code}: {message}'.strip(': ')))
+            if not fut.done(): fut.set_exception(RuntimeError('room.send_message gagal.')) if typ=='error' else fut.set_result(msg)
 
 async def sse_response(request, initial, queue):
     resp=web.StreamResponse(status=200,headers={'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive'})
@@ -274,46 +210,19 @@ async def login_batch(req):
     results=await asyncio.gather(*(one(i,x) for i,x in enumerate(inp))); return web.json_response({'ok':any(x['ok'] for x in results),'results':results})
 
 async def action(req):
-    b=await json_body(req)
-    sid=str(b.get('sessionId') or '').strip(); act=str(b.get('action') or '').strip()
-    room=normalize_room(b.get('room')); target=str(b.get('targetUsername') or '').strip(); message=b.get('message')
+    b=await json_body(req); sid=b.get('sessionId'); act=b.get('action'); room=b.get('room'); target=b.get('targetUsername'); message=b.get('message')
     if not sid or not act:return web.json_response({'ok':False,'error':'Parameter tidak lengkap.'},status=400)
     try:
-        if act=='join':
-            if not room: raise RuntimeError('Room wajib diisi.')
-            account=sessions.get(sid)
-            if not account: raise RuntimeError('Session tidak ditemukan / sudah terputus.')
-            fut=asyncio.get_running_loop().create_future()
-            room_join_waiters[sid]={'future':fut,'room':room}
-            account['joinRequestedRoom']=room; account['joinStatus']='pending'; account['joinError']=None
-            send(sid,{'type':'room.join','room':room})
-            try:
-                result=await asyncio.wait_for(fut,8)
-                joined=extract_room(result)
-                return web.json_response({'ok':True,'sent':'join','requestedRoom':room,'joinedRoom':joined or room,'event':result})
-            except asyncio.TimeoutError:
-                room_join_waiters.pop(sid,None)
-                # The command may still have been accepted by the upstream API;
-                # report it explicitly instead of pretending the room was joined.
-                account['joinStatus']='timeout'
-                raise RuntimeError(f'Timeout menunggu konfirmasi join room "{room}".')
-        elif act=='leave':
-            if not room: raise RuntimeError('Room wajib diisi.')
-            send(sid,{'type':'room.leave','room':room})
+        if act=='join': send(sid,{'type':'room.join','room':room})
+        elif act=='leave': send(sid,{'type':'room.leave','room':room})
         elif act=='participants':
-            if not room: raise RuntimeError('Room wajib diisi.')
             fut=new_waiter(participant_waiters,sid,8); send(sid,{'type':'room.participants','room':room}); return web.json_response({'ok':True,'sent':act,'event':await fut})
         elif act=='balance': send(sid,{'type':'wallet.balance'})
-        elif act=='message':
-            if not room or not message: raise RuntimeError('Room dan pesan wajib diisi.')
-            send(sid,{'type':'room.send_message','room':room,'message':message})
-        elif act=='kick':
-            if not room or not target: raise RuntimeError('Room dan target wajib diisi.')
-            send(sid,{'type':'room.kick','room':room,'target_username':target})
+        elif act=='message': send(sid,{'type':'room.send_message','room':room,'message':message})
+        elif act=='kick': send(sid,{'type':'room.kick','room':room,'target_username':target})
         else: raise RuntimeError('Action tidak dikenal.')
-        return web.json_response({'ok':True,'sent':act,'room':room or None})
-    except Exception as e:
-        return web.json_response({'ok':False,'error':safe_error(e),'room':room or None},status=400)
+        return web.json_response({'ok':True,'sent':act})
+    except Exception as e:return web.json_response({'ok':False,'error':safe_error(e)},status=400)
 
 async def balance_all(req):
     b=await json_body(req); ids=list(dict.fromkeys(map(str,b.get('sessionIds',[]))))[:10]
@@ -325,45 +234,26 @@ async def balance_all(req):
     return web.json_response({'ok':success>0,'action':'balance','sent':len(ids),'success':success,'total':len(ids),'results':results})
 
 async def batch_action(req):
-    b=await json_body(req)
-    ids=list(dict.fromkeys(str(x).strip() for x in (b.get('sessionIds') or []) if str(x).strip()))[:10]
-    act=str(b.get('action') or '').strip(); room=normalize_room(b.get('room')); target=str(b.get('targetUsername') or '').strip(); msg=b.get('message')
+    b=await json_body(req); ids=list(dict.fromkeys(map(str,b.get('sessionIds',[]))))[:10]; act=b.get('action'); room=b.get('room'); target=b.get('targetUsername'); msg=b.get('message')
     if not ids or not act:return web.json_response({'ok':False,'error':'Session atau action tidak lengkap.'},status=400)
-    if act in ('join','leave','participants','kick','message') and not room:return web.json_response({'ok':False,'error':'Room wajib diisi.'},status=400)
-    if act=='kick' and not target:return web.json_response({'ok':False,'error':'Target kick wajib diisi.'},status=400)
-    if act=='message' and not msg:return web.json_response({'ok':False,'error':'Pesan wajib diisi.'},status=400)
     types={'join':'room.join','leave':'room.leave','participants':'room.participants','balance':'wallet.balance','kick':'room.kick','message':'room.send_message'}
     if act not in types:return web.json_response({'ok':False,'error':'Action tidak dikenal.'},status=400)
-    payload={'type':types[act]}
+    payload={'type':types[act]};
     if act in ('join','leave','participants','kick','message'): payload['room']=room
     if act=='kick':payload['target_username']=target
     if act=='message':payload['message']=msg
     results=[]
     for sid in ids:
-        try:
-            if act=='join':
-                account=sessions.get(sid)
-                if not account: raise RuntimeError('Session tidak ditemukan / sudah terputus.')
-                old=room_join_waiters.pop(sid,None)
-                if old and not old['future'].done(): old['future'].cancel()
-                fut=asyncio.get_running_loop().create_future()
-                room_join_waiters[sid]={'future':fut,'room':room}
-                account['joinRequestedRoom']=room; account['joinStatus']='pending'; account['joinError']=None
-            send(sid,payload)
-            results.append({'sessionId':sid,'ok':True,'room':room or None})
-        except Exception as e:
-            results.append({'sessionId':sid,'ok':False,'error':safe_error(e),'room':room or None})
-    return web.json_response({'ok':any(x['ok'] for x in results),'action':act,'room':room or None,'sent':sum(x['ok'] for x in results),'total':len(results),'results':results})
+        try:send(sid,payload);results.append({'sessionId':sid,'ok':True})
+        except Exception as e:results.append({'sessionId':sid,'ok':False,'error':safe_error(e)})
+    return web.json_response({'ok':any(x['ok'] for x in results),'action':act,'sent':sum(x['ok'] for x in results),'total':len(results),'results':results})
 
 async def kick_loop(req):
     b=await json_body(req); slots=b.get('websocketSlots') or []
     entries=sorted({int(x.get('websocket')):str(x.get('sessionId','')).strip() for x in slots if str(x.get('sessionId','')).strip() and 1<=int(x.get('websocket',0))<=10}.items())
     ws_entries=[{'websocket':k,'sessionId':v} for k,v in entries]
     if not ws_entries: ws_entries=[{'websocket':i+1,'sessionId':str(x)} for i,x in enumerate(b.get('sessionIds',[])[:10])]
-    room=normalize_room(b.get('room'))
     targets=[str(x).strip() for x in b.get('targets',[]) if str(x).strip()][:10]
-    if not room:
-        return web.json_response({'ok':False,'error':'Room wajib diisi.'},status=400)
     burst=max(1,min(int(b.get('burstSize',3) or 3),10)); target_delay=max(0,min(float(b.get('textdelay',0) or 0),86400000)); batch_delay=max(0,min(float(b.get('delayBatch',0) or 0),86400000)); loops=max(1,min(int(b.get('textloop',30) or 30),100))
     if not ws_entries or not targets:return web.json_response({'ok':False,'error':'Troop atau target kosong.'},status=400)
     total_steps=loops*len(targets); total_jobs=total_steps*len(ws_entries); eid=make_id()
@@ -389,7 +279,7 @@ async def kick_loop(req):
                         if len(hist)<50: hist.append(n); break
                         await asyncio.sleep(max(.001,(500-(n-hist[0]))/1000))
                     try:
-                        send(sid,{'type':'room.kick','room':room,'target_username':target}); counters['dispatched']+=1; state['targetProgress'][pos+j]['dispatched']+=1; state['targetProgress'][pos+j]['completed']=min(state['targetProgress'][pos+j]['total'],state['targetProgress'][pos+j]['dispatched']//len(ws_entries)); state['wsProgress'][slot-1]['dispatched']+=1
+                        send(sid,{'type':'room.kick','room':b.get('room'),'target_username':target}); counters['dispatched']+=1; state['targetProgress'][pos+j]['dispatched']+=1; state['targetProgress'][pos+j]['completed']=min(state['targetProgress'][pos+j]['total'],state['targetProgress'][pos+j]['dispatched']//len(ws_entries)); state['wsProgress'][slot-1]['dispatched']+=1
                     except Exception: counters['failed']+=1; state['wsProgress'][slot-1]['failed']+=1
                     await publish({'phase':'dispatched','loop':r+1,'targetIndex':pos+j+1,'target':target,'websocket':slot,'sessionId':sid,'dispatchedJobs':counters['dispatched'],'failedJobs':counters['failed']})
                     if target_delay and j<len(group)-1: await asyncio.sleep(target_delay/1000)
@@ -424,13 +314,6 @@ async def kick_state(req):
     if not ex:return web.json_response({'ok':False,'error':'Execution tidak ditemukan.'},status=404)
     return web.json_response({'ok':True,'executionId':eid,'done':ex['done'],'progress':ex.get('latest',{}),'result':ex.get('result') if ex['done'] else None})
 
-async def room_status(req):
-    sid=str(req.query.get('sessionId','')).strip()
-    if not sid or sid not in sessions:
-        return web.json_response({'ok':False,'error':'Session tidak ditemukan.'},status=401)
-    a=sessions[sid]
-    return web.json_response({'ok':True,'sessionId':sid,'requestedRoom':a.get('joinRequestedRoom'),'joinedRoom':a.get('joinedRoom'),'joinStatus':a.get('joinStatus','idle'),'joinError':a.get('joinError')})
-
 async def events(req):
     sid=req.query.get('sessionId',''); account=sessions.get(sid)
     if not account:return web.Response(status=401)
@@ -444,15 +327,11 @@ async def logout_batch(req):
     b=await json_body(req); ids=list(dict.fromkeys(map(str,b.get('sessionIds',[]))))[:10] or list(sessions); closed=sum(await asyncio.gather(*(close_session(x,'logout all') for x in ids))); return web.json_response({'ok':True,'closed':closed})
 
 app=web.Application(client_max_size=128*1024)
-for path,handler,method in [('/api/health',health,'get'),('/api/login',login,'post'),('/api/login-batch',login_batch,'post'),('/api/action',action,'post'),('/api/balance-all',balance_all,'post'),('/api/batch-action',batch_action,'post'),('/api/kick-loop',kick_loop,'post'),('/api/kick-progress-stream',kick_stream,'get'),('/api/kick-progress-state',kick_state,'get'),('/api/events',events,'get'),('/api/room-status',room_status,'get'),('/api/logout',logout,'post'),('/api/logout-batch',logout_batch,'post')]: app.router.add_route(method,path,handler)
+for path,handler,method in [('/api/health',health,'get'),('/api/login',login,'post'),('/api/login-batch',login_batch,'post'),('/api/action',action,'post'),('/api/balance-all',balance_all,'post'),('/api/batch-action',batch_action,'post'),('/api/kick-loop',kick_loop,'post'),('/api/kick-progress-stream',kick_stream,'get'),('/api/kick-progress-state',kick_state,'get'),('/api/events',events,'get'),('/api/logout',logout,'post'),('/api/logout-batch',logout_batch,'post')]: app.router.add_route(method,path,handler)
 async def index(req):
     return web.FileResponse(os.path.join(os.path.dirname(__file__), 'public', 'index.html'))
 
 app.router.add_get('/', index)
-async def frontend_js(req):
-    path=os.path.join(os.path.dirname(__file__),'public','frontend.js')
-    return web.FileResponse(path, headers={'Cache-Control':'no-store, no-cache, must-revalidate, proxy-revalidate','Pragma':'no-cache','Expires':'0'})
-app.router.add_get('/frontend.js', frontend_js)
 app.router.add_static('/', os.path.join(os.path.dirname(__file__),'public'), show_index=False)
 
 if __name__=='__main__': web.run_app(app,host='0.0.0.0',port=PORT)

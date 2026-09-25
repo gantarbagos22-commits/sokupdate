@@ -13,7 +13,7 @@ KICK ALL menjalankan hingga 10 WebSocket secara bersamaan. Setiap WebSocket meng
 
 ## Deployment
 
-Jalankan dengan `npm start` atau `yarn start`. Dependency diambil dari `package.json`. Node.js 18 atau lebih baru diperlukan.
+Server sekarang hanya menggunakan `app.py` (Python + aiohttp). `server.js` sudah tidak diperlukan. Jalankan dengan `python app.py` atau `npm start` jika environment menyediakan Python. Install dependency dengan `pip install -r requirements.txt`.
 
 ## Performance
 
