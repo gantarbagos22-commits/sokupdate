@@ -254,7 +254,7 @@ async def kick_loop(req):
     ws_entries=[{'websocket':k,'sessionId':v} for k,v in entries]
     if not ws_entries: ws_entries=[{'websocket':i+1,'sessionId':str(x)} for i,x in enumerate(b.get('sessionIds',[])[:10])]
     targets=[str(x).strip() for x in b.get('targets',[]) if str(x).strip()][:10]
-    burst=max(1,min(int(b.get('burstSize',3) or 3),10)); target_delay=max(0,min(float(b.get('textdelay',0) or 0),86400000)); batch_delay=max(0,min(float(b.get('delayBatch',0) or 0),86400000)); loops=max(1,min(int(b.get('textloop',1) or 1),100))
+    burst=max(1,min(int(b.get('burstSize',3) or 3),10)); target_delay=max(0,min(float(b.get('textdelay',0) or 0),86400000)); batch_delay=max(0,min(float(b.get('delayBatch',0) or 0),86400000)); loops=max(1,min(int(b.get('textloop',30) or 30),100))
     if not ws_entries or not targets:return web.json_response({'ok':False,'error':'Troop atau target kosong.'},status=400)
     total_steps=loops*len(targets); total_jobs=total_steps*len(ws_entries); eid=make_id()
     ex={'id':eid,'done':False,'result':None}; kick_executions[eid]=ex
@@ -275,9 +275,9 @@ async def kick_loop(req):
                 group=targets[pos:pos+burst]
                 for j,target in enumerate(group):
                     while True:
-                        n=now_ms(); hist[:]=[t for t in hist if n-t<1000]
-                        if len(hist)<100: hist.append(n); break
-                        await asyncio.sleep(max(.001,(1000-(n-hist[0]))/1000))
+                        n=now_ms(); hist[:]=[t for t in hist if n-t<500]
+                        if len(hist)<50: hist.append(n); break
+                        await asyncio.sleep(max(.001,(500-(n-hist[0]))/1000))
                     try:
                         send(sid,{'type':'room.kick','room':b.get('room'),'target_username':target}); counters['dispatched']+=1; state['targetProgress'][pos+j]['dispatched']+=1; state['targetProgress'][pos+j]['completed']=min(state['targetProgress'][pos+j]['total'],state['targetProgress'][pos+j]['dispatched']//len(ws_entries)); state['wsProgress'][slot-1]['dispatched']+=1
                     except Exception: counters['failed']+=1; state['wsProgress'][slot-1]['failed']+=1

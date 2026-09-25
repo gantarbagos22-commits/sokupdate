@@ -570,7 +570,7 @@ app.post("/api/kick-loop", async (req, res) => {
     : [];
   const targetDelayMs = Math.max(0, Math.min(Number(textdelay) || 0, 86400000));
   const delayMs = Math.max(0, Math.min(Number(delayBatch) || 0, 86400000));
-  const loopCount = Math.max(1, Math.min(parseInt(textloop, 10) || 1, 100));
+  const loopCount = Math.max(1, Math.min(parseInt(textloop, 10) || 30, 100));
 
   if (!ids.length) return res.status(400).json({ ok: false, error: "Tidak ada Troop yang ONLINE." });
   if (!room) return res.status(400).json({ ok: false, error: "Room wajib diisi." });
@@ -647,10 +647,10 @@ app.post("/api/kick-loop", async (req, res) => {
       : ids.map((sessionId, i) => ({ sessionId, websocket: i + 1 }));
     const RACE_BURST = burstSize;
 
-    // KICK LIMIT: maximum 200 kick dispatches per physical WebSocket
+    // KICK LIMIT: maximum 50 kick dispatches per physical WebSocket
     // in any rolling 30-second window for KICK ALL.
     // It is intentionally per-WebSocket, not global.
-    const kickRateLimit = 200;
+    const kickRateLimit = 50;
     const kickRateWindowMs = 500;
     // Rate-limit pacing is handled directly by waitForKickRateLimit().
     const wsDispatchHistory = new Map();
