@@ -756,7 +756,7 @@ el("saveSet").onclick = function(){
     kickTimer: el("kickTimer")?.value ?? "60000",
     textdelay: el("textdelay")?.value ?? "15",
     delayBatch: el("delayBatch")?.value ?? "25",
-    textloop: el("textloop")?.value ?? "5",
+    textloop: el("textloop")?.value ?? "30",
     burstSize: el("burstSize")?.value ?? "3"
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:"application/json"});
