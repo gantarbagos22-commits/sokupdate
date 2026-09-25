@@ -441,7 +441,16 @@ async def events(req):
 async def logout(req):
     b=await json_body(req); await close_session(str(b.get('sessionId','')),'logout'); return web.json_response({'ok':True})
 async def logout_batch(req):
-    b=await json_body(req); ids=list(dict.fromkeys(map(str,b.get('sessionIds',[]))))[:10] or list(sessions); closed=sum(await asyncio.gather(*(close_session(x,'logout all') for x in ids))); return web.json_response({'ok':True,'closed':closed})
+    b=await json_body(req)
+    raw_ids = b.get('sessionIds') or []
+    ids = list(dict.fromkeys(str(x).strip() for x in raw_ids if str(x).strip()))
+    # If the client sends no IDs, close every currently tracked session.
+    if not ids:
+        ids = list(sessions)
+    results = await asyncio.gather(*(close_session(x, 'logout all') for x in ids), return_exceptions=True)
+    closed = sum(1 for result in results if result is True)
+    errors = [str(result) for result in results if isinstance(result, Exception)]
+    return web.json_response({'ok': not errors, 'closed': closed, 'requested': len(ids), 'errors': errors})
 
 app=web.Application(client_max_size=128*1024)
 for path,handler,method in [('/api/health',health,'get'),('/api/login',login,'post'),('/api/login-batch',login_batch,'post'),('/api/action',action,'post'),('/api/balance-all',balance_all,'post'),('/api/batch-action',batch_action,'post'),('/api/kick-loop',kick_loop,'post'),('/api/kick-progress-stream',kick_stream,'get'),('/api/kick-progress-state',kick_state,'get'),('/api/events',events,'get'),('/api/room-status',room_status,'get'),('/api/logout',logout,'post'),('/api/logout-batch',logout_batch,'post')]: app.router.add_route(method,path,handler)
