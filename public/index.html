@@ -710,6 +710,7 @@ box-sizing:border-box!important;border-radius:0!important;
   <div class="bg-slate-900/90 backdrop-blur-xl border border-blue-700/50 rounded-2xl sm:rounded-3xl p-4 sm:p-6 shadow-xl space-y-3.5">
     <div class="room-command-row">
       <input id="room" class="modern-input compact-room" placeholder="Nama room tujuan..." autocomplete="off">
+      <span id="roomJoinStatus" class="text-[10px] sm:text-xs text-slate-500 self-center whitespace-nowrap" aria-live="polite"></span>
       <div class="grid grid-cols-2 sm:flex sm:flex-row gap-2.5">
         <button onclick="joinAll()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-3 rounded-xl text-xs sm:text-sm shadow-lg shadow-blue-600/20 transition-all active:scale-95 whitespace-nowrap">JOIN</button>
         <button onclick="leaveAll()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold px-4 py-3 rounded-xl text-xs sm:text-sm border border-slate-700 transition-all active:scale-95 whitespace-nowrap">LEAVE</button>

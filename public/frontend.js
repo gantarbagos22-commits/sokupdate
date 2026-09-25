@@ -847,9 +847,43 @@ el("loginAll").onclick = loginAll;
 el("logoutAll").onclick = logoutAll;
 
 async function joinAll(){
-  const room = el("room").value.trim();
-  if(!room){ ; return; }
-  await batchAction("join", {room});
+  const room = el("room").value.trim().replace(/\s+/g, " ");
+  const statusEl = el("roomJoinStatus");
+  if(!room){ if(statusEl) statusEl.textContent = "Room wajib diisi"; return; }
+  if(statusEl) statusEl.textContent = "JOIN…";
+  const result = await batchAction("join", {room});
+  if(!result){ if(statusEl) statusEl.textContent = "JOIN gagal"; return; }
+
+  const okResults = (result.results || []).filter(x => x.ok && x.sessionId);
+  if(!okResults.length){
+    if(statusEl) statusEl.textContent = "Tidak ada WebSocket aktif";
+    return;
+  }
+
+  // batch-action hanya memastikan command berhasil dikirim. Verifikasi status
+  // join per WebSocket supaya UI tidak menganggap room sudah masuk sebelum API
+  // benar-benar mengirim room.join.result.
+  const checks = await Promise.all(okResults.map(async item => {
+    const deadline = Date.now() + 8500;
+    while(Date.now() < deadline){
+      try{
+        const r = await fetch(`/api/room-status?sessionId=${encodeURIComponent(item.sessionId)}`, {cache:"no-store"});
+        const j = await r.json();
+        if(j.joinStatus === "joined") return j;
+        if(j.joinStatus === "error") return j;
+      }catch{}
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return {joinStatus:"timeout", requestedRoom:room};
+  }));
+
+  const joined = checks.filter(x => x.joinStatus === "joined");
+  const failed = checks.filter(x => x.joinStatus !== "joined");
+  if(statusEl){
+    if(joined.length && !failed.length) statusEl.textContent = `JOIN OK: ${joined[0].joinedRoom || room}`;
+    else if(joined.length) statusEl.textContent = `JOIN ${joined.length}/${checks.length}: ${joined[0].joinedRoom || room}`;
+    else statusEl.textContent = failed[0]?.joinError || `JOIN gagal: ${failed[0]?.joinStatus || "timeout"}`;
+  }
 }
 
 async function leaveAll(){
