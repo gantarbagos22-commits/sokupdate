@@ -730,15 +730,37 @@ function toggleAccountCommands(){
 }
 
 async function logoutAll(){
+  // Invalidate session IDs BEFORE closing EventSource so its onerror/reconnect
+  // handler cannot reopen the SSE stream while logout is still in progress.
   const ids = accounts.map(a => a.sessionId).filter(Boolean);
-  accounts.forEach(a => { if(a.eventSource) try{ a.eventSource.close(); }catch{}; a.eventSource = null; });
-  try{ await fetch("/api/logout-batch", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({sessionIds:ids})}); }catch{}
-  for(let i=0; i<10; i++){
-    accounts[i].sessionId = null;
+  const previous = accounts.map(a => ({ sessionId: a.sessionId, eventSource: a.eventSource }));
+
+  for(const a of accounts){
+    a.sessionId = null;
+    a.eventSource = null;
+  }
+
+  for(const item of previous){
+    if(item.eventSource) try{ item.eventSource.close(); }catch{}
+  }
+
+  for(let i=0; i<accounts.length; i++){
     setStatus(i, "OFFLINE");
     setBalance(i, "-");
   }
+
+  let result = null;
+  try{
+    const r = await fetch("/api/logout-batch", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sessionIds:ids})
+    });
+    result = await r.json();
+  }catch{}
+
   resetKickAllProgress("Progress KICK ALL di-reset karena semua WebSocket logout.");
+  return result;
 }
 
 el("resetTimerButton")?.addEventListener("click", resetTimer);
