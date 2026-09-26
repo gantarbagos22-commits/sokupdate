@@ -365,13 +365,19 @@ async def kick_loop(req):
     if not room:
         return web.json_response({'ok':False,'error':'Room wajib diisi.'},status=400)
     burst=max(1,min(int(b.get('burstSize',3) or 3),10)); target_delay=max(0,min(float(b.get('textdelay',0) or 0),86400000)); batch_delay=max(0,min(float(b.get('delayBatch',0) or 0),86400000)); loops=max(1,min(int(b.get('textloop',30) or 30),100))
-    # Rate limit KICK dibuat independen untuk setiap websocket.
-    # Pola tetap: Socket 1=50, Socket 2=75, ... Socket 10=275 kick / 500 ms.
+    # Limit per websocket: 100 kick dalam satu window yang makin renggang.
+    # WS1 = 100 kick / 900 ms, WS2 = 100 / 910 ms, ... WS10 = 100 / 990 ms.
+    # Setiap websocket memiliki window independen agar pengiriman tetap rapat
+    # tanpa scheduler global yang memperlebar jarak antar websocket.
     socket_limits={}
     for item in ws_entries:
         slot=item['websocket']
-        max_kicks=50 + ((slot - 1) * 25)
-        socket_limits[slot]={'max':max_kicks,'windowMs':500}
+        window_ms=900 + ((slot - 1) * 10)
+        socket_limits[slot]={
+            'max':100,
+            'windowMs':window_ms,
+            'intervalMs':window_ms / 100
+        }
     if not ws_entries or not targets:return web.json_response({'ok':False,'error':'Troop atau target kosong.'},status=400)
     total_steps=loops*len(targets); total_jobs=total_steps*len(ws_entries); eid=make_id()
     ex={'id':eid,'done':False,'result':None}; kick_executions[eid]=ex
@@ -386,18 +392,28 @@ async def kick_loop(req):
             try:q.put_nowait(payload)
             except:pass
     async def run(runtime,counters):
-        sid=runtime['sessionId']; slot=runtime['websocket']; hist=[]
+        sid=runtime['sessionId']; slot=runtime['websocket']
         limit=socket_limits[slot]
+        window_start=None
+        sent_in_window=0
         for r in range(loops):
             for pos in range(0,len(targets),burst):
                 group=targets[pos:pos+burst]
                 for j,target in enumerate(group):
-                    while True:
-                        n=now_ms(); hist[:]=[t for t in hist if n-t<limit['windowMs']]
-                        if len(hist)<limit['max']: hist.append(n); break
-                        await asyncio.sleep(max(.001,(limit['windowMs']-(n-hist[0]))/1000))
+                    # 100 kick pertama dikirim rapat. Setelah 100 kick,
+                    # tunggu sampai window websocket tersebut selesai.
+                    now=asyncio.get_running_loop().time()
+                    if window_start is None:
+                        window_start=now
+                    elif sent_in_window >= limit['max']:
+                        elapsed=(now-window_start)*1000
+                        remaining=limit['windowMs']-elapsed
+                        if remaining>0:
+                            await asyncio.sleep(remaining/1000)
+                        window_start=asyncio.get_running_loop().time()
+                        sent_in_window=0
                     try:
-                        send(sid,{'type':'room.kick','room':room,'target_username':target}); counters['dispatched']+=1; state['targetProgress'][pos+j]['dispatched']+=1; state['targetProgress'][pos+j]['completed']=min(state['targetProgress'][pos+j]['total'],state['targetProgress'][pos+j]['dispatched']//len(ws_entries)); state['wsProgress'][slot-1]['dispatched']+=1
+                        send(sid,{'type':'room.kick','room':room,'target_username':target}); counters['dispatched']+=1; sent_in_window+=1; state['targetProgress'][pos+j]['dispatched']+=1; state['targetProgress'][pos+j]['completed']=min(state['targetProgress'][pos+j]['total'],state['targetProgress'][pos+j]['dispatched']//len(ws_entries)); state['wsProgress'][slot-1]['dispatched']+=1
                     except Exception: counters['failed']+=1; state['wsProgress'][slot-1]['failed']+=1
                     await publish({'phase':'dispatched','loop':r+1,'targetIndex':pos+j+1,'target':target,'websocket':slot,'sessionId':sid,'dispatchedJobs':counters['dispatched'],'failedJobs':counters['failed']})
                     if target_delay and j<len(group)-1: await asyncio.sleep(target_delay/1000)
