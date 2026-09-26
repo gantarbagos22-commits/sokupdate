@@ -1027,10 +1027,14 @@ async function kickSelectedTargets(){
   const delayBatch = Math.max(0, parseInt(el("delayBatch")?.value || "25", 10) || 0);
   const textloop = Math.max(1, parseInt(el("textloop")?.value || "1", 10) || 1);
   const burstSize = Math.max(1, Math.min(10, parseInt(el("burstSize")?.value || "10", 10) || 3));
-  // Limit KICK otomatis per socket: 50, 75, 100, ... 275 kick / 500 ms.
+  // Limit per websocket: WS1 100/900ms, WS2 100/910ms,
+  // ... WS10 100/990ms. Window tiap websocket berdiri sendiri.
   const socketKickLimits = {};
   accounts.forEach((a, i) => {
-    if (a.sessionId) socketKickLimits[String(i + 1)] = { max: 50 + (i * 25), windowMs: 500 };
+    if (a.sessionId) {
+      const windowMs = 900 + (i * 10);
+      socketKickLimits[String(i + 1)] = { max: 100, windowMs, intervalMs: windowMs / 100 };
+    }
   });
   const onlineSlots = accounts
     .map((a, i) => a.sessionId ? { sessionId: a.sessionId, websocket: i + 1 } : null)
