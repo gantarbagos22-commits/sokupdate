@@ -1027,6 +1027,11 @@ async function kickSelectedTargets(){
   const delayBatch = Math.max(0, parseInt(el("delayBatch")?.value || "25", 10) || 0);
   const textloop = Math.max(1, parseInt(el("textloop")?.value || "1", 10) || 1);
   const burstSize = Math.max(1, Math.min(10, parseInt(el("burstSize")?.value || "10", 10) || 3));
+  // Limit KICK otomatis per socket: 50, 75, 100, ... 275 kick / 500 ms.
+  const socketKickLimits = {};
+  accounts.forEach((a, i) => {
+    if (a.sessionId) socketKickLimits[String(i + 1)] = { max: 50 + (i * 25), windowMs: 500 };
+  });
   const onlineSlots = accounts
     .map((a, i) => a.sessionId ? { sessionId: a.sessionId, websocket: i + 1 } : null)
     .filter(Boolean);
@@ -1054,6 +1059,7 @@ async function kickSelectedTargets(){
       body:JSON.stringify({
         sessionIds: onlineSlots.map(x=>x.sessionId),
         websocketSlots: onlineSlots,
+        socketKickLimits,
         room, targets:[...targets], textdelay, delayBatch, textloop, burstSize
       })
     });
