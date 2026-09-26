@@ -365,11 +365,18 @@ async def kick_loop(req):
     if not room:
         return web.json_response({'ok':False,'error':'Room wajib diisi.'},status=400)
     burst=max(1,min(int(b.get('burstSize',3) or 3),10)); target_delay=max(0,min(float(b.get('textdelay',0) or 0),86400000)); batch_delay=max(0,min(float(b.get('delayBatch',0) or 0),86400000)); loops=max(1,min(int(b.get('textloop',30) or 30),100))
+    # Rate limit KICK dibuat independen untuk setiap websocket.
+    # Pola tetap: Socket 1=50, Socket 2=75, ... Socket 10=275 kick / 500 ms.
+    socket_limits={}
+    for item in ws_entries:
+        slot=item['websocket']
+        max_kicks=50 + ((slot - 1) * 25)
+        socket_limits[slot]={'max':max_kicks,'windowMs':500}
     if not ws_entries or not targets:return web.json_response({'ok':False,'error':'Troop atau target kosong.'},status=400)
     total_steps=loops*len(targets); total_jobs=total_steps*len(ws_entries); eid=make_id()
     ex={'id':eid,'done':False,'result':None}; kick_executions[eid]=ex
     qset=set(); kick_progress_subscribers[eid]=qset
-    state={'targetProgress':[{'targetIndex':i+1,'target':t,'completed':0,'dispatched':0,'total':len(ws_entries)*loops} for i,t in enumerate(targets)],'wsProgress':[{'websocket':x['websocket'],'sessionId':x['sessionId'],'completed':0,'dispatched':0,'total':total_steps,'failed':0} for x in ws_entries]}
+    state={'targetProgress':[{'targetIndex':i+1,'target':t,'completed':0,'dispatched':0,'total':len(ws_entries)*loops} for i,t in enumerate(targets)],'wsProgress':[{'websocket':x['websocket'],'sessionId':x['sessionId'],'completed':0,'dispatched':0,'total':total_steps,'failed':0,'limit':socket_limits[x['websocket']]} for x in ws_entries]}
     async def publish(ev):
         state['completedSteps']=min(total_steps,sum(x['completed'] for x in state['targetProgress'])); state['percent']=round(ev.get('dispatchedJobs',0)*100/total_jobs) if total_jobs else 0
         p={'type':'kick.progress',**ev,**state,'totalSteps':total_steps,'totalJobs':total_jobs}
@@ -380,14 +387,15 @@ async def kick_loop(req):
             except:pass
     async def run(runtime,counters):
         sid=runtime['sessionId']; slot=runtime['websocket']; hist=[]
+        limit=socket_limits[slot]
         for r in range(loops):
             for pos in range(0,len(targets),burst):
                 group=targets[pos:pos+burst]
                 for j,target in enumerate(group):
                     while True:
-                        n=now_ms(); hist[:]=[t for t in hist if n-t<500]
-                        if len(hist)<50: hist.append(n); break
-                        await asyncio.sleep(max(.001,(500-(n-hist[0]))/1000))
+                        n=now_ms(); hist[:]=[t for t in hist if n-t<limit['windowMs']]
+                        if len(hist)<limit['max']: hist.append(n); break
+                        await asyncio.sleep(max(.001,(limit['windowMs']-(n-hist[0]))/1000))
                     try:
                         send(sid,{'type':'room.kick','room':room,'target_username':target}); counters['dispatched']+=1; state['targetProgress'][pos+j]['dispatched']+=1; state['targetProgress'][pos+j]['completed']=min(state['targetProgress'][pos+j]['total'],state['targetProgress'][pos+j]['dispatched']//len(ws_entries)); state['wsProgress'][slot-1]['dispatched']+=1
                     except Exception: counters['failed']+=1; state['wsProgress'][slot-1]['failed']+=1
